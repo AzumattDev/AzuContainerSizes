@@ -94,7 +94,6 @@ public class Functions
     {
         GUILayout.ExpandHeight(true);
         GUILayout.ExpandWidth(true);
-        entry.BoxedValue = GUILayout.TextArea((string)entry.BoxedValue, GUILayout.ExpandWidth(true),
-            GUILayout.ExpandHeight(true));
+        entry.BoxedValue = GUILayout.TextArea((string)entry.BoxedValue, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
     }
 }

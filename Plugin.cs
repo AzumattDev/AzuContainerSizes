@@ -15,7 +15,7 @@ namespace AzuContainerSizes
     public class AzuContainerSizesPlugin : BaseUnityPlugin
     {
         internal const string ModName = "AzuContainerSizes";
-        internal const string ModVersion = "1.0.3";
+        internal const string ModVersion = "1.1.0";
         internal const string Author = "Azumatt";
         private const string ModGUID = Author + "." + ModName;
         private static string ConfigFileName = ModGUID + ".cfg";
@@ -104,11 +104,7 @@ namespace AzuContainerSizes
         internal ConfigEntry<T> config<T>(string group, string name, T value, ConfigDescription description,
             bool synchronizedSetting = true)
         {
-            ConfigDescription extendedDescription =
-                new(
-                    description.Description +
-                    (synchronizedSetting ? " [Synced with Server]" : " [Not Synced with Server]"),
-                    description.AcceptableValues, description.Tags);
+            ConfigDescription extendedDescription = new(description.Description + (synchronizedSetting ? " [Synced with Server]" : " [Not Synced with Server]"), description.AcceptableValues, description.Tags);
             ConfigEntry<T> configEntry = Config.Bind(group, name, value, extendedDescription);
             //var configEntry = Config.Bind(group, name, value, description);
 
@@ -118,14 +114,12 @@ namespace AzuContainerSizes
             return configEntry;
         }
 
-        internal ConfigEntry<T> config<T>(string group, string name, T value, string description,
-            bool synchronizedSetting = true)
+        internal ConfigEntry<T> config<T>(string group, string name, T value, string description, bool synchronizedSetting = true)
         {
             return config(group, name, value, new ConfigDescription(description), synchronizedSetting);
         }
 
-        internal ConfigEntry<T> TextEntryConfig<T>(string group, string name, T value, string desc,
-            bool synchronizedSetting = true)
+        internal ConfigEntry<T> TextEntryConfig<T>(string group, string name, T value, string desc, bool synchronizedSetting = true)
         {
             ConfigurationManagerAttributes attributes = new()
             {
@@ -151,8 +145,7 @@ namespace AzuContainerSizes
             public override object Clamp(object value) => value;
             public override bool IsValid(object value) => true;
 
-            public override string ToDescriptionString() =>
-                "# Acceptable values: " + string.Join(", ", UnityInput.Current.SupportedKeyCodes);
+            public override string ToDescriptionString() => "# Acceptable values: " + string.Join(", ", UnityInput.Current.SupportedKeyCodes);
         }
 
         #endregion

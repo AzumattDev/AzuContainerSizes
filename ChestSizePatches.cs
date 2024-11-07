@@ -8,9 +8,7 @@ public static class ContainerAwakePatch
 {
     private static void Postfix(Container __instance, ref Inventory ___m_inventory)
     {
-        if (__instance.name.StartsWith("Treasure") || ___m_inventory == null ||
-            !__instance.m_nview.IsValid() ||
-            __instance.m_nview.GetZDO().GetLong("creator".GetStableHashCode()) == 0L)
+        if (__instance.name.StartsWith("Treasure") || ___m_inventory == null || !__instance.m_nview.IsValid() || __instance.m_nview.GetZDO().GetLong("creator".GetStableHashCode()) == 0L)
             return;
 
         Inventory? inventory = __instance.GetInventory();
@@ -32,9 +30,7 @@ public static class ContainerInteractPatch
 {
     private static void Prefix(Container __instance, Humanoid character, bool hold, bool alt)
     {
-        if (__instance.name.StartsWith("Treasure") || __instance.GetInventory() == null ||
-            !__instance.m_nview.IsValid() ||
-            __instance.m_nview.GetZDO().GetLong("creator".GetStableHashCode()) == 0L)
+        if (__instance.name.StartsWith("Treasure") || __instance.GetInventory() == null || !__instance.m_nview.IsValid() || __instance.m_nview.GetZDO().GetLong("creator".GetStableHashCode()) == 0L)
             return;
 
         Inventory? inventory = __instance.GetInventory();
@@ -92,8 +88,7 @@ public static class ContainerFunctions
                 }
                 else
                 {
-                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError(
-                        $"Custom Chest Container Rows & Columns value for {chestName} row is not a valid integer.");
+                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Chest Container Rows & Columns value for {chestName} row is not a valid integer.");
                 }
 
                 if (int.TryParse(chestRowColList[index].Trim().Split(':')[1], out int inventoryColumn))
@@ -102,8 +97,7 @@ public static class ContainerFunctions
                 }
                 else
                 {
-                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError(
-                        $"Custom Chest Container Rows & Columns value for {chestName} column is not a valid integer.");
+                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Chest Container Rows & Columns value for {chestName} column is not a valid integer.");
                 }
             }
         }
@@ -133,8 +127,7 @@ public static class ContainerFunctions
             string[] shipRcList = AzuContainerSizesPlugin.ShipCustomRowCol.Value.Trim().Split(',');
             if (shipList.Length != shipRcList.Length)
             {
-                AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError(
-                    $"Custom Ship List and Custom Ship Container Rows & Columns length mismatch. Currently you have {shipList.Length} ships and {shipRcList.Length} row/column sets respectively.");
+                AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Ship List and Custom Ship Container Rows & Columns length mismatch. Currently you have {shipList.Length} ships and {shipRcList.Length} row/column sets respectively.");
                 return;
             }
 
@@ -148,8 +141,7 @@ public static class ContainerFunctions
                 }
                 else
                 {
-                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError(
-                        $"Custom Ship Container Rows & Columns value for {shipName} row is not a valid integer.");
+                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Ship Container Rows & Columns value for {shipName} row is not a valid integer.");
                 }
 
                 if (int.TryParse(shipRcList[i].Trim().Split(':')[1], out int inventoryColumn))
@@ -158,8 +150,7 @@ public static class ContainerFunctions
                 }
                 else
                 {
-                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError(
-                        $"Custom Ship Container Rows & Columns value for {shipName} column is not a valid integer.");
+                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Ship Container Rows & Columns value for {shipName} column is not a valid integer.");
                 }
             }
         }
@@ -168,9 +159,7 @@ public static class ContainerFunctions
     {
         foreach (Container container in Resources.FindObjectsOfTypeAll<Container>())
         {
-            if (container.name.StartsWith("Treasure") || container.GetInventory() == null ||
-                !container.m_nview.IsValid() ||
-                container.m_nview.GetZDO().GetLong("creator".GetStableHashCode()) == 0L)
+            if (container.name.StartsWith("Treasure") || container.GetInventory() == null || !container.m_nview.IsValid() || container.m_nview.GetZDO().GetLong("creator".GetStableHashCode()) == 0L)
                 return;
             Inventory? inventory = container.GetInventory();
             ref Inventory? containerinventory = ref inventory;
