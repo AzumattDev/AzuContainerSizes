@@ -15,7 +15,7 @@ namespace AzuContainerSizes
     public class AzuContainerSizesPlugin : BaseUnityPlugin
     {
         internal const string ModName = "AzuContainerSizes";
-        internal const string ModVersion = "1.1.1";
+        internal const string ModVersion = "1.1.2";
         internal const string Author = "Azumatt";
         private const string ModGUID = Author + "." + ModName;
         private static string ConfigFileName = ModGUID + ".cfg";
@@ -149,5 +149,18 @@ namespace AzuContainerSizes
         }
 
         #endregion
+    }
+
+    public static class ToggleExtentions
+    {
+        public static bool IsOn(this AzuContainerSizesPlugin.Toggle value)
+        {
+            return value == AzuContainerSizesPlugin.Toggle.On;
+        }
+
+        public static bool IsOff(this AzuContainerSizesPlugin.Toggle value)
+        {
+            return value == AzuContainerSizesPlugin.Toggle.Off;
+        }
     }
 }

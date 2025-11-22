@@ -1,8 +1,9 @@
-| `Version` | `Update Notes`                                                           |
-|-----------|--------------------------------------------------------------------------|
-| 1.1.1     | - Update ServerSync                                                      |
-| 1.1.0     | - Update for Bog Witch                                                   |
-| 1.0.3     | - Update for Valheim's latest update (0.217.46)                          |
-| 1.0.2     | - Update for Valheim's latest update                                     |
-| 1.0.1     | - Had to fix a readme error. 1.0.1 is only the version for thunderstore. |
-| 1.0.0     | - Initial Release                                                        |
+| `Version` | `Update Notes`                                                                                                                                                                                                                                                                                  |
+|-----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1.1.2     | - Prevent item loss when accidentally (or on purpose) changing the configuration to have less slots in a chest than there are items. Items will spawn next to the chest that became invalid. The path is attempt to stack to existing -> find empty slot -> if nothing, drop next to container. |
+| 1.1.1     | - Update ServerSync                                                                                                                                                                                                                                                                             |
+| 1.1.0     | - Update for Bog Witch                                                                                                                                                                                                                                                                          |
+| 1.0.3     | - Update for Valheim's latest update (0.217.46)                                                                                                                                                                                                                                                 |
+| 1.0.2     | - Update for Valheim's latest update                                                                                                                                                                                                                                                            |
+| 1.0.1     | - Had to fix a readme error. 1.0.1 is only the version for thunderstore.                                                                                                                                                                                                                        |
+| 1.0.0     | - Initial Release                                                                                                                                                                                                                                                                               |

@@ -1,55 +1,108 @@
-﻿using HarmonyLib;
+﻿using System;
+using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
 using UnityEngine;
+using Object = UnityEngine.Object;
 
 namespace AzuContainerSizes;
 
 [HarmonyPatch(typeof(Container), nameof(Container.Awake))]
 public static class ContainerAwakePatch
 {
-    private static void Postfix(Container __instance, ref Inventory ___m_inventory)
+    private static void Postfix(Container __instance)
     {
-        if (__instance.name.StartsWith("Treasure") || ___m_inventory == null || !__instance.m_nview.IsValid() || __instance.m_nview.GetZDO().GetLong("creator".GetStableHashCode()) == 0L)
-            return;
-
-        Inventory? inventory = __instance.GetInventory();
-        ref Inventory? containerinventory = ref inventory;
-        var root = __instance.transform.root;
-        string inventoryName = root.name.Trim().Replace("(Clone)", "");
-
-
-        ref int inventoryColumns = ref containerinventory.m_width;
-        ref int inventoryRows = ref containerinventory.m_height;
-        ContainerFunctions.UpdateContainerSize(ref inventoryName, ref inventoryRows, ref inventoryColumns);
-
+        ContainerFunctions.ApplyConfiguredSize(__instance);
     }
 }
 
-// Check on Container Interact as well since the awake above isn't guaranteed to run on all containers (usually right after they are built)
 [HarmonyPatch(typeof(Container), nameof(Container.Interact))]
 public static class ContainerInteractPatch
 {
     private static void Prefix(Container __instance, Humanoid character, bool hold, bool alt)
     {
-        if (__instance.name.StartsWith("Treasure") || __instance.GetInventory() == null || !__instance.m_nview.IsValid() || __instance.m_nview.GetZDO().GetLong("creator".GetStableHashCode()) == 0L)
-            return;
-
-        Inventory? inventory = __instance.GetInventory();
-        ref Inventory? containerinventory = ref inventory;
-        var root = __instance.transform.root;
-        string inventoryName = root.name.Trim().Replace("(Clone)", "");
-
-
-        ref int inventoryColumns = ref containerinventory.m_width;
-        ref int inventoryRows = ref containerinventory.m_height;
-        ContainerFunctions.UpdateContainerSize(ref inventoryName, ref inventoryRows, ref inventoryColumns);
+        ContainerFunctions.ApplyConfiguredSize(__instance);
     }
 }
 
 public static class ContainerFunctions
 {
-    public static void UpdateContainerSize(ref string inventoryName, ref int inventoryRows, ref int inventoryColumns)
+    public static void ApplyConfiguredSize(Container container)
     {
-        if (AzuContainerSizesPlugin.ChestContainerControl.Value == AzuContainerSizesPlugin.Toggle.On)
+        if (!IsValidContainer(container))
+            return;
+
+        Inventory inventory = container.GetInventory();
+        if (inventory == null)
+            return;
+
+        int currentRows = inventory.m_height;
+        int currentCols = inventory.m_width;
+
+        Transform root = container.transform.root;
+        string inventoryName = root ? root.name.Trim().Replace("(Clone)", "") : container.name;
+
+        int newRows = currentRows;
+        int newCols = currentCols;
+
+        ApplySizeConfigForName(ref inventoryName, ref newRows, ref newCols);
+
+        // Safety clamp in case someone hand-edits configs to garbage
+        newRows = Mathf.Max(1, newRows);
+        newCols = Mathf.Max(1, newCols);
+
+        // Nothing changed – bail early
+        if (newRows == currentRows && newCols == currentCols)
+            return;
+
+        // Protect items before we actually change the size
+        ProtectItemsOnResize(container, inventory, newRows, newCols);
+
+        inventory.m_height = newRows;
+        inventory.m_width = newCols;
+
+        try
+        {
+            inventory.Changed();
+        }
+        catch (Exception e)
+        {
+            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogDebug($"Failed to invoke Inventory.Changed for container '{inventoryName}': {e}");
+        }
+    }
+
+    public static void UpdateContainerSize()
+    {
+        foreach (Container container in Resources.FindObjectsOfTypeAll<Container>())
+        {
+            ApplyConfiguredSize(container);
+        }
+    }
+
+    private static bool IsValidContainer(Container container)
+    {
+        if (!container)
+            return false;
+
+        if (!container.m_nview || !container.m_nview.IsValid())
+            return false;
+
+        ZDO zdo = container.m_nview.GetZDO();
+        if (zdo == null)
+            return false;
+
+        if (zdo.GetLong(ZDOVars.s_creator) == 0L)
+            return false;
+
+        if (!container.m_nview.IsOwner())
+            return false;
+
+        return container.GetInventory() != null;
+    }
+
+    private static void ApplySizeConfigForName(ref string inventoryName, ref int inventoryRows, ref int inventoryColumns)
+    {
+        if (AzuContainerSizesPlugin.ChestContainerControl.Value.IsOn())
         {
             switch (inventoryName)
             {
@@ -75,34 +128,48 @@ public static class ContainerFunctions
                     break;
             }
 
-            string[] chestList = AzuContainerSizesPlugin.ChestList.Value.Trim().Split(',');
-            string[] chestRowColList = AzuContainerSizesPlugin.CustomRowCol.Value.Trim().Split(',');
-            for (int index = 0; index < chestList.Length; index++)
+            string chestListRaw = AzuContainerSizesPlugin.ChestList.Value;
+            string chestRowColRaw = AzuContainerSizesPlugin.CustomRowCol.Value;
+
+            if (!string.IsNullOrWhiteSpace(chestListRaw) && !string.IsNullOrWhiteSpace(chestRowColRaw))
             {
-                string chestName = chestList[index];
-                if (inventoryName != chestName) continue;
+                string[] chestList = chestListRaw.Trim().Split([','], StringSplitOptions.RemoveEmptyEntries);
+                string[] chestRowColList = chestRowColRaw.Trim().Split([','], StringSplitOptions.RemoveEmptyEntries);
 
-                if (int.TryParse(chestRowColList[index].Trim().Split(':')[0], out int inventoryRow))
+                if (chestList.Length != chestRowColList.Length)
                 {
-                    inventoryRows = inventoryRow;
+                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Chest List and Custom Chest Rows & Columns length mismatch. Currently you have {chestList.Length} chests and {chestRowColList.Length} row/column sets respectively.");
                 }
                 else
                 {
-                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Chest Container Rows & Columns value for {chestName} row is not a valid integer.");
-                }
+                    for (int index = 0; index < chestList.Length; ++index)
+                    {
+                        string chestName = chestList[index].Trim();
+                        if (!string.Equals(inventoryName, chestName, StringComparison.Ordinal))
+                            continue;
 
-                if (int.TryParse(chestRowColList[index].Trim().Split(':')[1], out int inventoryColumn))
-                {
-                    inventoryColumns = inventoryColumn;
-                }
-                else
-                {
-                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Chest Container Rows & Columns value for {chestName} column is not a valid integer.");
+                        string[] parts = chestRowColList[index].Trim().Split(':');
+                        if (parts.Length != 2)
+                        {
+                            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Chest Rows & Columns value for '{chestName}' is not in 'rows:cols' format.");
+                            continue;
+                        }
+
+                        if (int.TryParse(parts[0], out int inventoryRow))
+                            inventoryRows = inventoryRow;
+                        else
+                            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Chest Container Rows & Columns value for {chestName} row is not a valid integer.");
+
+                        if (int.TryParse(parts[1], out int inventoryColumn))
+                            inventoryColumns = inventoryColumn;
+                        else
+                            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Chest Container Rows & Columns value for {chestName} column is not a valid integer.");
+                    }
                 }
             }
         }
 
-        if (AzuContainerSizesPlugin.ShipContainerControl.Value == AzuContainerSizesPlugin.Toggle.On)
+        if (AzuContainerSizesPlugin.ShipContainerControl.Value.IsOn())
         {
             switch (inventoryName)
             {
@@ -112,7 +179,6 @@ public static class ContainerFunctions
                     break;
                 // Longboat (Large boat)
                 case "VikingShip":
-                    // Log the height and width of the container
                     inventoryRows = AzuContainerSizesPlugin.LongRow.Value;
                     inventoryColumns = AzuContainerSizesPlugin.LongCol.Value;
                     break;
@@ -123,51 +189,239 @@ public static class ContainerFunctions
                     break;
             }
 
-            string[] shipList = AzuContainerSizesPlugin.ShipList.Value.Trim().Split(',');
-            string[] shipRcList = AzuContainerSizesPlugin.ShipCustomRowCol.Value.Trim().Split(',');
-            if (shipList.Length != shipRcList.Length)
-            {
-                AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Ship List and Custom Ship Container Rows & Columns length mismatch. Currently you have {shipList.Length} ships and {shipRcList.Length} row/column sets respectively.");
-                return;
-            }
+            string shipListRaw = AzuContainerSizesPlugin.ShipList.Value;
+            string shipRowColRaw = AzuContainerSizesPlugin.ShipCustomRowCol.Value;
 
-            for (int i = 0; i < shipList.Length; ++i)
+            if (!string.IsNullOrWhiteSpace(shipListRaw) && !string.IsNullOrWhiteSpace(shipRowColRaw))
             {
-                string shipName = shipList[i];
-                if (inventoryName != shipName) continue;
-                if (int.TryParse(shipRcList[i].Trim().Split(':')[0], out int inventoryRow))
+                string[] shipList = shipListRaw.Trim().Split([','], StringSplitOptions.RemoveEmptyEntries);
+                string[] shipRcList = shipRowColRaw.Trim().Split([','], StringSplitOptions.RemoveEmptyEntries);
+
+                if (shipList.Length != shipRcList.Length)
                 {
-                    inventoryRows = inventoryRow;
+                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Ship List and Custom Ship Container Rows & Columns length mismatch. Currently you have {shipList.Length} ships and {shipRcList.Length} row/column sets respectively.");
                 }
                 else
                 {
-                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Ship Container Rows & Columns value for {shipName} row is not a valid integer.");
-                }
+                    for (int i = 0; i < shipList.Length; ++i)
+                    {
+                        string shipName = shipList[i].Trim();
+                        if (!string.Equals(inventoryName, shipName, StringComparison.Ordinal))
+                            continue;
 
-                if (int.TryParse(shipRcList[i].Trim().Split(':')[1], out int inventoryColumn))
-                {
-                    inventoryColumns = inventoryColumn;
-                }
-                else
-                {
-                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Ship Container Rows & Columns value for {shipName} column is not a valid integer.");
+                        string[] parts = shipRcList[i].Trim().Split(':');
+                        if (parts.Length != 2)
+                        {
+                            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Ship Container Rows & Columns value for '{shipName}' is not in 'rows:cols' format.");
+                            continue;
+                        }
+
+                        if (int.TryParse(parts[0], out int inventoryRow))
+                            inventoryRows = inventoryRow;
+                        else
+                            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Ship Container Rows & Columns value for {shipName} row is not a valid integer.");
+
+                        if (int.TryParse(parts[1], out int inventoryColumn))
+                            inventoryColumns = inventoryColumn;
+                        else
+                            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Ship Container Rows & Columns value for {shipName} column is not a valid integer.");
+                    }
                 }
             }
         }
     }
-    public static void UpdateContainerSize()
+
+    private static void ProtectItemsOnResize(Container container, Inventory inventory, int newRows, int newCols)
     {
-        foreach (Container container in Resources.FindObjectsOfTypeAll<Container>())
+        List<ItemDrop.ItemData> items = inventory.GetAllItems();
+        if (items == null || items.Count == 0)
+            return;
+
+        bool[,] occupied = new bool[newCols, newRows];
+        List<ItemDrop.ItemData> inBounds = new(items.Count);
+        List<ItemDrop.ItemData> overflow = new(items.Count);
+
+        // Classify items as "already valid" or "overflow"
+        foreach (ItemDrop.ItemData item in items)
         {
-            if (container.name.StartsWith("Treasure") || container.GetInventory() == null || !container.m_nview.IsValid() || container.m_nview.GetZDO().GetLong("creator".GetStableHashCode()) == 0L)
-                return;
-            Inventory? inventory = container.GetInventory();
-            ref Inventory? containerinventory = ref inventory;
-            var root = container.transform.root;
-            string inventoryName = root.name.Trim().Replace("(Clone)", "");
-            ref var containerInvWidth = ref containerinventory.m_width;
-            ref var containerInvHeight = ref containerinventory.m_height;
-            UpdateContainerSize(ref inventoryName, ref containerInvHeight, ref containerInvWidth);
+            if (item is not { m_stack: > 0 })
+                continue;
+
+            Vector2i pos = item.m_gridPos;
+
+            if (pos.x >= 0 && pos.x < newCols && pos.y >= 0 && pos.y < newRows)
+            {
+                if (!occupied[pos.x, pos.y])
+                {
+                    occupied[pos.x, pos.y] = true;
+                    inBounds.Add(item);
+                }
+                else
+                {
+                    // Multiple items in one slot: keep the first, overflow the rest
+                    overflow.Add(item);
+                }
+            }
+            else
+            {
+                overflow.Add(item);
+            }
+        }
+
+        if (overflow.Count == 0)
+            return;
+
+        TryMergeOverflowIntoExistingStacks(overflow, inBounds);
+
+        foreach (ItemDrop.ItemData item in overflow)
+        {
+            if (item is not { m_stack: > 0 })
+                continue;
+
+            if (TryPlaceInFreeSlot(item, occupied, newCols, newRows, out Vector2i newPos))
+            {
+                item.m_gridPos = newPos;
+                inBounds.Add(item);
+            }
+            else
+            {
+                // No space left at all in the resized container – drop it next to the chest
+                DropItemFromContainer(container, item);
+                item.m_stack = 0;
+            }
+        }
+
+        items.RemoveAll(i => i is not { m_stack: > 0 });
+    }
+
+    private static void TryMergeOverflowIntoExistingStacks(List<ItemDrop.ItemData> overflow, List<ItemDrop.ItemData> inBounds)
+    {
+        if (overflow.Count == 0 || inBounds.Count == 0)
+            return;
+
+        foreach (ItemDrop.ItemData overflowItem in overflow)
+        {
+            if (overflowItem is not { m_stack: > 0 })
+                continue;
+
+            int remaining = overflowItem.m_stack;
+
+            foreach (ItemDrop.ItemData target in inBounds)
+            {
+                if (target == null)
+                    continue;
+
+                if (!CanStack(target, overflowItem))
+                    continue;
+
+                int maxStack = target.m_shared.m_maxStackSize;
+                if (maxStack <= 1)
+                    continue;
+
+                int space = maxStack - target.m_stack;
+                if (space <= 0)
+                    continue;
+
+                int move = Mathf.Min(space, remaining);
+                target.m_stack += move;
+                remaining -= move;
+
+                if (remaining <= 0)
+                    break;
+            }
+
+            overflowItem.m_stack = remaining;
+        }
+
+        overflow.RemoveAll(i => i is not { m_stack: > 0 });
+    }
+
+    private static bool CanStack(ItemDrop.ItemData a, ItemDrop.ItemData b)
+    {
+        if (a.m_shared == null || b.m_shared == null)
+            return false;
+
+        if (!string.Equals(a.m_shared.m_name, b.m_shared.m_name, StringComparison.Ordinal))
+            return false;
+
+        if (a.m_shared.m_maxStackSize <= 1)
+            return false;
+
+        // Keep rules simple/safe – same quality & variant only
+        if (a.m_quality != b.m_quality)
+            return false;
+
+        return a.m_variant == b.m_variant;
+    }
+
+    private static bool TryPlaceInFreeSlot(ItemDrop.ItemData item, bool[,] occupied, int cols, int rows, out Vector2i pos)
+    {
+        for (int y = 0; y < rows; ++y)
+        {
+            for (int x = 0; x < cols; ++x)
+            {
+                if (occupied[x, y])
+                    continue;
+
+                occupied[x, y] = true;
+                pos = new Vector2i(x, y);
+                return true;
+            }
+        }
+
+        pos = default(Vector2i);
+        return false;
+    }
+
+    /// <summary>
+    /// Spawns the item as a world drop next to the container, preserving as much data as possible.
+    /// Only called on the owner.
+    /// </summary>
+    private static void DropItemFromContainer(Container container, ItemDrop.ItemData item)
+    {
+        if (item.m_stack <= 0)
+            return;
+
+        if (!item.m_dropPrefab)
+        {
+            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogWarning($"Unable to drop overflow item '{item.m_shared?.m_name ?? "<null>"}' from container '{container.name}' because it has no drop prefab.");
+            return;
+        }
+
+        try
+        {
+            Vector3 chestPos = container.transform.position;
+            Vector3 forward = container.transform.forward;
+
+            Vector3 dropPos = chestPos + forward * 0.6f + Vector3.up * 0.3f;
+            Vector3 dropVel = forward * 1.5f + Vector3.up * 2f;
+
+            GameObject worldObject = Object.Instantiate(item.m_dropPrefab.gameObject, dropPos, Quaternion.identity);
+
+            if (worldObject.TryGetComponent(out Rigidbody rb))
+            {
+                rb.linearVelocity = dropVel;
+            }
+
+            if (!worldObject.TryGetComponent(out ItemDrop drop)) return;
+            ItemDrop.ItemData data = drop.m_itemData;
+
+            // Copy core state
+            data.m_stack = item.m_stack;
+            data.m_quality = item.m_quality;
+            data.m_variant = item.m_variant;
+            data.m_durability = item.m_durability;
+            data.m_crafterID = item.m_crafterID;
+            data.m_crafterName = item.m_crafterName;
+
+            if (item.m_customData is not { Count: > 0 }) return;
+            data.m_customData.Clear();
+            foreach (KeyValuePair<string, string> kv in item.m_customData)
+                data.m_customData[kv.Key] = kv.Value;
+        }
+        catch (Exception e)
+        {
+            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Failed to drop overflow item '{item.m_shared?.m_name ?? "<null>"}' from container '{container.name}': {e}");
         }
     }
 }
