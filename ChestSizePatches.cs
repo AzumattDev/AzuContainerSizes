@@ -1,11 +1,97 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
 namespace AzuContainerSizes;
+
+[HarmonyPatch(typeof(ZNetScene), nameof(ZNetScene.Awake))]
+public static class ZNetSceneAwakePatch
+{
+    private static void Postfix(ZNetScene __instance)
+    {
+        foreach (GameObject prefab in __instance.m_prefabs)
+        {
+            if (!prefab)
+                continue;
+
+            Container? container = prefab.GetComponentInChildren<Container>(true);
+            if (!container)
+                continue;
+
+            int rows = container.m_height;
+            int cols = container.m_width;
+
+            ContainerFunctions.GetConfiguredSizeForPrefab(prefab.name, ref rows, ref cols);
+
+            container.m_height = rows;
+            container.m_width = cols;
+        }
+    }
+}
+
+[HarmonyPatch(typeof(Container), nameof(Container.Load))]
+public static class ContainerLoadPatch
+{
+    private static void Prefix(Container __instance)
+    {
+        if (!__instance || !__instance.m_nview || !__instance.m_nview.IsValid())
+            return;
+
+        if (!__instance.m_nview.IsOwner())
+            return;
+
+        ZDO zdo = __instance.m_nview.GetZDO();
+        if (zdo == null)
+            return;
+
+        string itemsString = zdo.GetString(ZDOVars.s_items);
+        if (string.IsNullOrEmpty(itemsString))
+            return;
+        ZPackage pkg = new(itemsString);
+        // Use a large enough grid to load any items that might have been in a bigger container in the past.
+        Inventory tempInv = new(__instance.m_name, null, 30, 30);
+        tempInv.Load(pkg);
+
+        List<ItemDrop.ItemData> tempItems = tempInv.GetAllItems();
+        if (tempItems == null || tempItems.Count == 0)
+            return;
+
+        int maxX = -1;
+        int maxY = -1;
+
+        foreach (ItemDrop.ItemData item in tempItems)
+        {
+            if (item is not { m_stack: > 0 })
+                continue;
+
+            Vector2i pos = item.m_gridPos;
+            if (pos.x > maxX) maxX = pos.x;
+            if (pos.y > maxY) maxY = pos.y;
+        }
+
+        if (maxX < 0 && maxY < 0)
+            return; // nothing valid
+
+        int neededWidth = maxX + 1;
+        int neededHeight = maxY + 1;
+
+        Inventory inv = __instance.m_inventory;
+        if (inv == null)
+        {
+            inv = new Inventory(__instance.m_name, null, neededWidth, neededHeight);
+            __instance.m_inventory = inv;
+        }
+        else
+        {
+            if (inv.m_width < neededWidth)
+                inv.m_width = neededWidth;
+            if (inv.m_height < neededHeight)
+                inv.m_height = neededHeight;
+        }
+    }
+}
 
 [HarmonyPatch(typeof(Container), nameof(Container.Awake))]
 public static class ContainerAwakePatch
@@ -42,33 +128,34 @@ public static class ContainerFunctions
         Transform root = container.transform.root;
         string inventoryName = root ? root.name.Trim().Replace("(Clone)", "") : container.name;
 
-        int newRows = currentRows;
-        int newCols = currentCols;
+        int targetRows = currentRows;
+        int targetCols = currentCols;
 
-        ApplySizeConfigForName(ref inventoryName, ref newRows, ref newCols);
+        GetConfiguredSizeForName(inventoryName, ref targetRows, ref targetCols);
 
-        // Safety clamp in case someone hand-edits configs to garbage
-        newRows = Mathf.Max(1, newRows);
-        newCols = Mathf.Max(1, newCols);
+        targetRows = Mathf.Max(1, targetRows);
+        targetCols = Mathf.Max(1, targetCols);
 
-        // Nothing changed – bail early
-        if (newRows == currentRows && newCols == currentCols)
+        if (targetRows == currentRows && targetCols == currentCols)
             return;
 
-        // Protect items before we actually change the size
-        ProtectItemsOnResize(container, inventory, newRows, newCols);
+        bool shrinking = targetRows < currentRows || targetCols < currentCols;
 
-        inventory.m_height = newRows;
-        inventory.m_width = newCols;
+        if (!shrinking)
+        {
+            inventory.m_height = targetRows;
+            inventory.m_width = targetCols;
 
-        try
-        {
-            inventory.Changed();
+            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogDebug($"Container '{inventoryName}' resized (grow) from {currentCols}x{currentRows} to {targetCols}x{targetRows}.");
+            return;
         }
-        catch (Exception e)
-        {
-            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogDebug($"Failed to invoke Inventory.Changed for container '{inventoryName}': {e}");
-        }
+
+        HandleShrinkWithOverflowDrop(container, inventory, inventoryName, currentCols, currentRows, targetCols, targetRows);
+
+        inventory.m_height = targetRows;
+        inventory.m_width = targetCols;
+
+        AzuContainerSizesPlugin.AzuContainerSizesLogger.LogDebug($"Container '{inventoryName}' resized (shrink) from {currentCols}x{currentRows} to {targetCols}x{targetRows}.");
     }
 
     public static void UpdateContainerSize()
@@ -100,9 +187,134 @@ public static class ContainerFunctions
         return container.GetInventory() != null;
     }
 
-    private static void ApplySizeConfigForName(ref string inventoryName, ref int inventoryRows, ref int inventoryColumns)
+    /// <summary>
+    /// Shrinking:
+    /// - Finds items that will be outside the new bounds.
+    /// - Tries to move them into free slots inside the new grid.
+    /// - Drops any that still don't fit using ItemDrop.DropItem.
+    /// </summary>
+    private static void HandleShrinkWithOverflowDrop(Container container, Inventory inv, string inventoryName, int oldCols, int oldRows, int newCols, int newRows)
     {
-        if (AzuContainerSizesPlugin.ChestContainerControl.Value.IsOn())
+        List<ItemDrop.ItemData> items = inv.GetAllItems();
+        if (items == null || items.Count == 0)
+            return;
+
+        // Track occupancy for the *new* grid
+        bool[,] occupied = new bool[newCols, newRows];
+        List<ItemDrop.ItemData> overflow = new(items.Count);
+
+        // First pass: mark items already within new bounds; overflow the rest
+        foreach (ItemDrop.ItemData item in items)
+        {
+            if (item is not { m_stack: > 0 })
+                continue;
+
+            Vector2i pos = item.m_gridPos;
+
+            // Negative positions are considered overflow
+            if (pos.x < 0 || pos.y < 0 || pos.x >= newCols || pos.y >= newRows)
+            {
+                overflow.Add(item);
+                continue;
+            }
+
+            if (!occupied[pos.x, pos.y])
+            {
+                occupied[pos.x, pos.y] = true;
+            }
+            else
+            {
+                // Two items in same slot? Keep the first, overflow the rest.
+                overflow.Add(item);
+            }
+        }
+
+        // Second pass: try to move overflow items into free slots inside the new grid
+        List<ItemDrop.ItemData> stillOverflow = [];
+
+        foreach (ItemDrop.ItemData item in overflow)
+        {
+            if (item is not { m_stack: > 0 })
+                continue;
+
+            if (TryFindFirstFreeSlot(occupied, newCols, newRows, out Vector2i freePos))
+            {
+                item.m_gridPos = freePos;
+                occupied[freePos.x, freePos.y] = true;
+            }
+            else
+            {
+                // No room left anywhere in the new grid
+                stillOverflow.Add(item);
+            }
+        }
+
+        if (stillOverflow.Count == 0)
+            return;
+
+        // Third pass: drop the truly overflowing items next to the container
+        Vector3 basePos = container.transform.position;
+        Vector3 forward = container.transform.forward;
+
+        Vector3 dropBasePos = basePos + forward * 0.6f + Vector3.up * 0.3f;
+
+        int index = 0;
+
+        foreach (ItemDrop.ItemData item in stillOverflow)
+        {
+            if (item is not { m_stack: > 0 })
+                continue;
+
+            int amount = item.m_stack;
+
+            // Slight spread so they don't all land in the same spot
+            float angle = index * 20f;
+            Vector3 dir = Quaternion.Euler(0f, angle, 0f) * forward;
+            Vector3 dropPos = dropBasePos + dir * 0.2f;
+
+            // Remove from inventory first, like Player.DropItem does
+            bool removed = inv.RemoveItem(item, amount);
+            if (!removed)
+            {
+                AzuContainerSizesPlugin.AzuContainerSizesLogger.LogWarning($"Failed to remove overflow item '{item.m_shared?.m_name ?? "<null>"}' from container '{inventoryName}' while shrinking.");
+                continue;
+            }
+
+            try
+            {
+                ItemDrop.DropItem(item, amount, dropPos, Quaternion.identity);
+            }
+            catch (Exception e)
+            {
+                AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Exception while dropping overflow item '{item.m_shared?.m_name ?? "<null>"}' from container '{inventoryName}': {e}");
+            }
+
+            index++;
+        }
+    }
+
+    private static bool TryFindFirstFreeSlot(bool[,] occupied, int cols, int rows, out Vector2i pos)
+    {
+        for (int y = 0; y < rows; ++y)
+        {
+            for (int x = 0; x < cols; ++x)
+            {
+                if (occupied[x, y]) continue;
+                pos = new Vector2i(x, y);
+                return true;
+            }
+        }
+
+        pos = default;
+        return false;
+    }
+
+    private static void GetConfiguredSizeForName(string inventoryName, ref int rows, ref int cols)
+    {
+        int inventoryRows = rows;
+        int inventoryColumns = cols;
+
+        if (AzuContainerSizesPlugin.ChestContainerControl.Value == AzuContainerSizesPlugin.Toggle.On)
         {
             switch (inventoryName)
             {
@@ -148,7 +360,8 @@ public static class ContainerFunctions
                         if (!string.Equals(inventoryName, chestName, StringComparison.Ordinal))
                             continue;
 
-                        string[] parts = chestRowColList[index].Trim().Split(':');
+                        string pair = chestRowColList[index].Trim();
+                        string[] parts = pair.Split(':');
                         if (parts.Length != 2)
                         {
                             AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Chest Rows & Columns value for '{chestName}' is not in 'rows:cols' format.");
@@ -209,7 +422,8 @@ public static class ContainerFunctions
                         if (!string.Equals(inventoryName, shipName, StringComparison.Ordinal))
                             continue;
 
-                        string[] parts = shipRcList[i].Trim().Split(':');
+                        string pair = shipRcList[i].Trim();
+                        string[] parts = pair.Split(':');
                         if (parts.Length != 2)
                         {
                             AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Custom Ship Container Rows & Columns value for '{shipName}' is not in 'rows:cols' format.");
@@ -229,199 +443,13 @@ public static class ContainerFunctions
                 }
             }
         }
+
+        rows = Mathf.Max(1, inventoryRows);
+        cols = Mathf.Max(1, inventoryColumns);
     }
 
-    private static void ProtectItemsOnResize(Container container, Inventory inventory, int newRows, int newCols)
+    public static void GetConfiguredSizeForPrefab(string prefabName, ref int rows, ref int cols)
     {
-        List<ItemDrop.ItemData> items = inventory.GetAllItems();
-        if (items == null || items.Count == 0)
-            return;
-
-        bool[,] occupied = new bool[newCols, newRows];
-        List<ItemDrop.ItemData> inBounds = new(items.Count);
-        List<ItemDrop.ItemData> overflow = new(items.Count);
-
-        // Classify items as "already valid" or "overflow"
-        foreach (ItemDrop.ItemData item in items)
-        {
-            if (item is not { m_stack: > 0 })
-                continue;
-
-            Vector2i pos = item.m_gridPos;
-
-            if (pos.x >= 0 && pos.x < newCols && pos.y >= 0 && pos.y < newRows)
-            {
-                if (!occupied[pos.x, pos.y])
-                {
-                    occupied[pos.x, pos.y] = true;
-                    inBounds.Add(item);
-                }
-                else
-                {
-                    // Multiple items in one slot: keep the first, overflow the rest
-                    overflow.Add(item);
-                }
-            }
-            else
-            {
-                overflow.Add(item);
-            }
-        }
-
-        if (overflow.Count == 0)
-            return;
-
-        TryMergeOverflowIntoExistingStacks(overflow, inBounds);
-
-        foreach (ItemDrop.ItemData item in overflow)
-        {
-            if (item is not { m_stack: > 0 })
-                continue;
-
-            if (TryPlaceInFreeSlot(item, occupied, newCols, newRows, out Vector2i newPos))
-            {
-                item.m_gridPos = newPos;
-                inBounds.Add(item);
-            }
-            else
-            {
-                // No space left at all in the resized container – drop it next to the chest
-                DropItemFromContainer(container, item);
-                item.m_stack = 0;
-            }
-        }
-
-        items.RemoveAll(i => i is not { m_stack: > 0 });
-    }
-
-    private static void TryMergeOverflowIntoExistingStacks(List<ItemDrop.ItemData> overflow, List<ItemDrop.ItemData> inBounds)
-    {
-        if (overflow.Count == 0 || inBounds.Count == 0)
-            return;
-
-        foreach (ItemDrop.ItemData overflowItem in overflow)
-        {
-            if (overflowItem is not { m_stack: > 0 })
-                continue;
-
-            int remaining = overflowItem.m_stack;
-
-            foreach (ItemDrop.ItemData target in inBounds)
-            {
-                if (target == null)
-                    continue;
-
-                if (!CanStack(target, overflowItem))
-                    continue;
-
-                int maxStack = target.m_shared.m_maxStackSize;
-                if (maxStack <= 1)
-                    continue;
-
-                int space = maxStack - target.m_stack;
-                if (space <= 0)
-                    continue;
-
-                int move = Mathf.Min(space, remaining);
-                target.m_stack += move;
-                remaining -= move;
-
-                if (remaining <= 0)
-                    break;
-            }
-
-            overflowItem.m_stack = remaining;
-        }
-
-        overflow.RemoveAll(i => i is not { m_stack: > 0 });
-    }
-
-    private static bool CanStack(ItemDrop.ItemData a, ItemDrop.ItemData b)
-    {
-        if (a.m_shared == null || b.m_shared == null)
-            return false;
-
-        if (!string.Equals(a.m_shared.m_name, b.m_shared.m_name, StringComparison.Ordinal))
-            return false;
-
-        if (a.m_shared.m_maxStackSize <= 1)
-            return false;
-
-        // Keep rules simple/safe – same quality & variant only
-        if (a.m_quality != b.m_quality)
-            return false;
-
-        return a.m_variant == b.m_variant;
-    }
-
-    private static bool TryPlaceInFreeSlot(ItemDrop.ItemData item, bool[,] occupied, int cols, int rows, out Vector2i pos)
-    {
-        for (int y = 0; y < rows; ++y)
-        {
-            for (int x = 0; x < cols; ++x)
-            {
-                if (occupied[x, y])
-                    continue;
-
-                occupied[x, y] = true;
-                pos = new Vector2i(x, y);
-                return true;
-            }
-        }
-
-        pos = default(Vector2i);
-        return false;
-    }
-
-    /// <summary>
-    /// Spawns the item as a world drop next to the container, preserving as much data as possible.
-    /// Only called on the owner.
-    /// </summary>
-    private static void DropItemFromContainer(Container container, ItemDrop.ItemData item)
-    {
-        if (item.m_stack <= 0)
-            return;
-
-        if (!item.m_dropPrefab)
-        {
-            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogWarning($"Unable to drop overflow item '{item.m_shared?.m_name ?? "<null>"}' from container '{container.name}' because it has no drop prefab.");
-            return;
-        }
-
-        try
-        {
-            Vector3 chestPos = container.transform.position;
-            Vector3 forward = container.transform.forward;
-
-            Vector3 dropPos = chestPos + forward * 0.6f + Vector3.up * 0.3f;
-            Vector3 dropVel = forward * 1.5f + Vector3.up * 2f;
-
-            GameObject worldObject = Object.Instantiate(item.m_dropPrefab.gameObject, dropPos, Quaternion.identity);
-
-            if (worldObject.TryGetComponent(out Rigidbody rb))
-            {
-                rb.linearVelocity = dropVel;
-            }
-
-            if (!worldObject.TryGetComponent(out ItemDrop drop)) return;
-            ItemDrop.ItemData data = drop.m_itemData;
-
-            // Copy core state
-            data.m_stack = item.m_stack;
-            data.m_quality = item.m_quality;
-            data.m_variant = item.m_variant;
-            data.m_durability = item.m_durability;
-            data.m_crafterID = item.m_crafterID;
-            data.m_crafterName = item.m_crafterName;
-
-            if (item.m_customData is not { Count: > 0 }) return;
-            data.m_customData.Clear();
-            foreach (KeyValuePair<string, string> kv in item.m_customData)
-                data.m_customData[kv.Key] = kv.Value;
-        }
-        catch (Exception e)
-        {
-            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Failed to drop overflow item '{item.m_shared?.m_name ?? "<null>"}' from container '{container.name}': {e}");
-        }
+        GetConfiguredSizeForName(prefabName, ref rows, ref cols);
     }
 }
