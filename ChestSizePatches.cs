@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using UnityEngine;
 
@@ -64,67 +65,20 @@ internal static class ContainerFunctions
     /// </summary>
     internal static void AdjustSizeBeforeInventoryCtor(Container container)
     {
-        if (!container)
-            return;
-
-        ZNetView nview = container.m_nview;
-        if (!nview || !nview.IsValid())
-            return;
-
-        ZDO zdo = nview.GetZDO();
-        if (zdo == null)
+        if (!TryGetValidZdo(container, out ZDO zdo))
             return;
 
         int rows = container.m_height;
         int cols = container.m_width;
 
-        Transform root = container.transform.root;
-        string inventoryName = root ? root.name.Trim().Replace("(Clone)", "") : container.gameObject.name;
-
+        string inventoryName = GetInventoryName(container);
         GetConfiguredSizeForName(inventoryName, ref rows, ref cols);
 
         rows = Mathf.Max(1, rows);
         cols = Mathf.Max(1, cols);
 
         // Ensure not to shrink below what the items already saved in it need in order to fit.
-        string itemsStr = zdo.GetString(ZDOVars.s_items);
-        if (!string.IsNullOrEmpty(itemsStr))
-        {
-            try
-            {
-                // Parse the saved package into a big temporary inventory to
-                // see all grid positions without clipping.
-                ZPackage pkg = new(itemsStr);
-                Inventory tempInv = new(container.m_name, null, 30, 30);
-                tempInv.Load(pkg);
-
-                List<ItemDrop.ItemData> items = tempInv.GetAllItems();
-                if (items is { Count: > 0 })
-                {
-                    int maxX = -1;
-                    int maxY = -1;
-
-                    foreach (ItemDrop.ItemData item in items)
-                    {
-                        if (item is not { m_stack: > 0 })
-                            continue;
-
-                        Vector2i p = item.m_gridPos;
-                        if (p.x > maxX) maxX = p.x;
-                        if (p.y > maxY) maxY = p.y;
-                    }
-
-                    if (maxX >= 0)
-                        cols = Mathf.Max(cols, maxX + 1);
-                    if (maxY >= 0)
-                        rows = Mathf.Max(rows, maxY + 1);
-                }
-            }
-            catch (Exception e)
-            {
-                AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Failed to probe saved items in AdjustSizeBeforeInventoryCtor for '{inventoryName}': {e}");
-            }
-        }
+        EnsureFitsSavedItems(container, zdo, ref rows, ref cols, inventoryName);
 
         container.m_width = cols;
         container.m_height = rows;
@@ -141,14 +95,7 @@ internal static class ContainerFunctions
     {
         foreach (Container container in Resources.FindObjectsOfTypeAll<Container>())
         {
-            if (!container)
-                continue;
-
-            if (!container.m_nview || !container.m_nview.IsValid())
-                continue;
-
-            ZDO zdo = container.m_nview.GetZDO();
-            if (zdo == null)
+            if (!TryGetValidZdo(container, out ZDO zdo))
                 continue;
 
             Inventory inv = container.GetInventory();
@@ -158,49 +105,12 @@ internal static class ContainerFunctions
             int rows = inv.m_height;
             int cols = inv.m_width;
 
-            Transform root = container.transform.root;
-            string inventoryName = root ? root.name.Trim().Replace("(Clone)", "") : container.gameObject.name;
-
+            string inventoryName = GetInventoryName(container);
             GetConfiguredSizeForName(inventoryName, ref rows, ref cols);
             rows = Mathf.Max(1, rows);
             cols = Mathf.Max(1, cols);
 
-            string itemsStr = zdo.GetString(ZDOVars.s_items);
-            if (!string.IsNullOrEmpty(itemsStr))
-            {
-                try
-                {
-                    ZPackage pkg = new(itemsStr);
-                    Inventory tempInv = new(container.m_name, null, 30, 30);
-                    tempInv.Load(pkg);
-
-                    List<ItemDrop.ItemData> items = tempInv.GetAllItems();
-                    if (items is { Count: > 0 })
-                    {
-                        int maxX = -1;
-                        int maxY = -1;
-
-                        foreach (ItemDrop.ItemData item in items)
-                        {
-                            if (item is not { m_stack: > 0 })
-                                continue;
-
-                            Vector2i p = item.m_gridPos;
-                            if (p.x > maxX) maxX = p.x;
-                            if (p.y > maxY) maxY = p.y;
-                        }
-
-                        if (maxX >= 0)
-                            cols = Mathf.Max(cols, maxX + 1);
-                        if (maxY >= 0)
-                            rows = Mathf.Max(rows, maxY + 1);
-                    }
-                }
-                catch (Exception e)
-                {
-                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Failed to probe saved items in UpdateContainerSize for '{inventoryName}': {e}");
-                }
-            }
+            EnsureFitsSavedItems(container, zdo, ref rows, ref cols, inventoryName);
 
             inv.m_width = cols;
             inv.m_height = rows;
@@ -346,8 +256,73 @@ internal static class ContainerFunctions
         cols = Mathf.Max(1, inventoryColumns);
     }
 
-    public static void GetConfiguredSizeForPrefab(string prefabName, ref int rows, ref int cols)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool TryGetValidZdo(Container container, out ZDO zdo)
     {
-        GetConfiguredSizeForName(prefabName, ref rows, ref cols);
+        zdo = null;
+
+        if (!container)
+            return false;
+
+        ZNetView nview = container.m_nview;
+        if (!nview || !nview.IsValid())
+            return false;
+
+        zdo = nview.GetZDO();
+        return zdo != null;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static string GetInventoryName(Container container)
+    {
+        Transform root = container.transform.root;
+        return root ? root.name.Trim().Replace("(Clone)", "") : container.gameObject.name;
+    }
+
+    /// <summary>
+    /// Reads ZDO.s_items and ensures rows/cols are not smaller than the maximum
+    /// grid positions of saved items.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void EnsureFitsSavedItems(Container container, ZDO zdo, ref int rows, ref int cols, string inventoryName)
+    {
+        string itemsStr = zdo.GetString(ZDOVars.s_items);
+        if (string.IsNullOrEmpty(itemsStr))
+            return;
+
+        try
+        {
+            // Parse the saved package into a big temporary inventory to
+            // see all grid positions without clipping.
+            ZPackage pkg = new(itemsStr);
+            Inventory tempInv = new(container.m_name, null, 30, 30);
+            tempInv.Load(pkg);
+
+            List<ItemDrop.ItemData> items = tempInv.GetAllItems();
+            if (items is { Count: > 0 })
+            {
+                int maxX = -1;
+                int maxY = -1;
+
+                foreach (ItemDrop.ItemData item in items)
+                {
+                    if (item is not { m_stack: > 0 })
+                        continue;
+
+                    Vector2i p = item.m_gridPos;
+                    if (p.x > maxX) maxX = p.x;
+                    if (p.y > maxY) maxY = p.y;
+                }
+
+                if (maxX >= 0)
+                    cols = Mathf.Max(cols, maxX + 1);
+                if (maxY >= 0)
+                    rows = Mathf.Max(rows, maxY + 1);
+            }
+        }
+        catch (Exception e)
+        {
+            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Failed to probe saved items for '{inventoryName}': {e}");
+        }
     }
 }
