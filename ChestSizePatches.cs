@@ -1,312 +1,210 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Reflection;
+using System.Reflection.Emit;
 using HarmonyLib;
 using UnityEngine;
-using Object = UnityEngine.Object;
 
 namespace AzuContainerSizes;
 
-[HarmonyPatch(typeof(ZNetScene), nameof(ZNetScene.Awake))]
-public static class ZNetSceneAwakePatch
-{
-    private static void Postfix(ZNetScene __instance)
-    {
-        foreach (GameObject prefab in __instance.m_prefabs)
-        {
-            if (!prefab)
-                continue;
-
-            Container? container = prefab.GetComponentInChildren<Container>(true);
-            if (!container)
-                continue;
-
-            int rows = container.m_height;
-            int cols = container.m_width;
-
-            ContainerFunctions.GetConfiguredSizeForPrefab(prefab.name, ref rows, ref cols);
-
-            container.m_height = rows;
-            container.m_width = cols;
-        }
-    }
-}
-
-[HarmonyPatch(typeof(Container), nameof(Container.Load))]
-public static class ContainerLoadPatch
-{
-    private static void Prefix(Container __instance)
-    {
-        if (!__instance || !__instance.m_nview || !__instance.m_nview.IsValid())
-            return;
-
-        if (!__instance.m_nview.IsOwner())
-            return;
-
-        ZDO zdo = __instance.m_nview.GetZDO();
-        if (zdo == null)
-            return;
-
-        string itemsString = zdo.GetString(ZDOVars.s_items);
-        if (string.IsNullOrEmpty(itemsString))
-            return;
-        ZPackage pkg = new(itemsString);
-        // Use a large enough grid to load any items that might have been in a bigger container in the past.
-        Inventory tempInv = new(__instance.m_name, null, 30, 30);
-        tempInv.Load(pkg);
-
-        List<ItemDrop.ItemData> tempItems = tempInv.GetAllItems();
-        if (tempItems == null || tempItems.Count == 0)
-            return;
-
-        int maxX = -1;
-        int maxY = -1;
-
-        foreach (ItemDrop.ItemData item in tempItems)
-        {
-            if (item is not { m_stack: > 0 })
-                continue;
-
-            Vector2i pos = item.m_gridPos;
-            if (pos.x > maxX) maxX = pos.x;
-            if (pos.y > maxY) maxY = pos.y;
-        }
-
-        if (maxX < 0 && maxY < 0)
-            return; // nothing valid
-
-        int neededWidth = maxX + 1;
-        int neededHeight = maxY + 1;
-
-        Inventory inv = __instance.m_inventory;
-        if (inv == null)
-        {
-            inv = new Inventory(__instance.m_name, null, neededWidth, neededHeight);
-            __instance.m_inventory = inv;
-        }
-        else
-        {
-            if (inv.m_width < neededWidth)
-                inv.m_width = neededWidth;
-            if (inv.m_height < neededHeight)
-                inv.m_height = neededHeight;
-        }
-    }
-}
-
+/// <summary>
+/// Transpiles Container.Awake to call a sizing helper *before* the Inventory ctor
+/// arguments (m_name, m_bkg, m_width, m_height) are loaded.
+/// This lets me:
+///  - Apply config size.
+///  - Expand to fit any saved items in ZDO.
+/// so the initial Inventory is always big enough, even if the chest was offline (not loaded)
+/// when the config shrank.
+/// </summary>
 [HarmonyPatch(typeof(Container), nameof(Container.Awake))]
-public static class ContainerAwakePatch
+internal static class ContainerAwakeTranspilerPatch
 {
-    private static void Postfix(Container __instance)
+    private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
     {
-        ContainerFunctions.ApplyConfiguredSize(__instance);
+        List<CodeInstruction> list = new(instructions);
+        FieldInfo? nameField = AccessTools.Field(typeof(Container), "m_name");
+        MethodInfo? adjustMethod = AccessTools.Method(typeof(ContainerFunctions), nameof(ContainerFunctions.AdjustSizeBeforeInventoryCtor));
+
+        bool injected = false;
+
+        for (int i = 0; i < list.Count; ++i)
+        {
+            CodeInstruction? ins = list[i];
+            var next = i + 1;
+            // Find the first "ldarg.0; ldfld Container::m_name" that starts the arg
+            // sequence for new Inventory(...), and inject sizing call *before* it.
+            if (!injected && ins.opcode == OpCodes.Ldarg_0 && next < list.Count && list[next].opcode == OpCodes.Ldfld && Equals(list[next].operand, nameField))
+            {
+                // Inject: AdjustSizeBeforeInventoryCtor(this);
+                yield return new CodeInstruction(OpCodes.Ldarg_0);
+                yield return new CodeInstruction(OpCodes.Call, adjustMethod);
+
+                injected = true;
+            }
+
+            yield return ins;
+        }
+
+        if (!injected)
+        {
+            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogWarning("Failed to inject Container.Awake transpiler; AdjustSizeBeforeInventoryCtor was not inserted.");
+        }
     }
 }
 
-[HarmonyPatch(typeof(Container), nameof(Container.Interact))]
-public static class ContainerInteractPatch
+internal static class ContainerFunctions
 {
-    private static void Prefix(Container __instance, Humanoid character, bool hold, bool alt)
-    {
-        ContainerFunctions.ApplyConfiguredSize(__instance);
-    }
-}
-
-public static class ContainerFunctions
-{
-    public static void ApplyConfiguredSize(Container container)
-    {
-        if (!IsValidContainer(container))
-            return;
-
-        Inventory inventory = container.GetInventory();
-        if (inventory == null)
-            return;
-
-        int currentRows = inventory.m_height;
-        int currentCols = inventory.m_width;
-
-        Transform root = container.transform.root;
-        string inventoryName = root ? root.name.Trim().Replace("(Clone)", "") : container.name;
-
-        int targetRows = currentRows;
-        int targetCols = currentCols;
-
-        GetConfiguredSizeForName(inventoryName, ref targetRows, ref targetCols);
-
-        targetRows = Mathf.Max(1, targetRows);
-        targetCols = Mathf.Max(1, targetCols);
-
-        if (targetRows == currentRows && targetCols == currentCols)
-            return;
-
-        bool shrinking = targetRows < currentRows || targetCols < currentCols;
-
-        if (!shrinking)
-        {
-            inventory.m_height = targetRows;
-            inventory.m_width = targetCols;
-
-            AzuContainerSizesPlugin.AzuContainerSizesLogger.LogDebug($"Container '{inventoryName}' resized (grow) from {currentCols}x{currentRows} to {targetCols}x{targetRows}.");
-            return;
-        }
-
-        HandleShrinkWithOverflowDrop(container, inventory, inventoryName, currentCols, currentRows, targetCols, targetRows);
-
-        inventory.m_height = targetRows;
-        inventory.m_width = targetCols;
-
-        AzuContainerSizesPlugin.AzuContainerSizesLogger.LogDebug($"Container '{inventoryName}' resized (shrink) from {currentCols}x{currentRows} to {targetCols}x{targetRows}.");
-    }
-
-    public static void UpdateContainerSize()
-    {
-        foreach (Container container in Resources.FindObjectsOfTypeAll<Container>())
-        {
-            ApplyConfiguredSize(container);
-        }
-    }
-
-    private static bool IsValidContainer(Container container)
+    /// <summary>
+    /// Called from the Awake transpiler *before* Inventory is constructed.
+    /// 1. Applies config size (chest/ship/carts/custom lists).
+    /// 2. Reads saved items from ZDO.s_items and expands width/height if needed,
+    ///    so I never create an Inventory that is smaller than the existing contents.
+    ///
+    /// Result: no items are ever clipped when the chest was offline at config change.
+    /// </summary>
+    internal static void AdjustSizeBeforeInventoryCtor(Container container)
     {
         if (!container)
-            return false;
+            return;
 
-        if (!container.m_nview || !container.m_nview.IsValid())
-            return false;
+        ZNetView nview = container.m_nview;
+        if (!nview || !nview.IsValid())
+            return;
 
-        ZDO zdo = container.m_nview.GetZDO();
+        ZDO zdo = nview.GetZDO();
         if (zdo == null)
-            return false;
-
-        if (zdo.GetLong(ZDOVars.s_creator) == 0L)
-            return false;
-
-        if (!container.m_nview.IsOwner())
-            return false;
-
-        return container.GetInventory() != null;
-    }
-
-    /// <summary>
-    /// Shrinking:
-    /// - Finds items that will be outside the new bounds.
-    /// - Tries to move them into free slots inside the new grid.
-    /// - Drops any that still don't fit using ItemDrop.DropItem.
-    /// </summary>
-    private static void HandleShrinkWithOverflowDrop(Container container, Inventory inv, string inventoryName, int oldCols, int oldRows, int newCols, int newRows)
-    {
-        List<ItemDrop.ItemData> items = inv.GetAllItems();
-        if (items == null || items.Count == 0)
             return;
 
-        // Track occupancy for the *new* grid
-        bool[,] occupied = new bool[newCols, newRows];
-        List<ItemDrop.ItemData> overflow = new(items.Count);
+        int rows = container.m_height;
+        int cols = container.m_width;
 
-        // First pass: mark items already within new bounds; overflow the rest
-        foreach (ItemDrop.ItemData item in items)
+        Transform root = container.transform.root;
+        string inventoryName = root ? root.name.Trim().Replace("(Clone)", "") : container.gameObject.name;
+
+        GetConfiguredSizeForName(inventoryName, ref rows, ref cols);
+
+        rows = Mathf.Max(1, rows);
+        cols = Mathf.Max(1, cols);
+
+        // Ensure not to shrink below what the items already saved in it need in order to fit.
+        string itemsStr = zdo.GetString(ZDOVars.s_items);
+        if (!string.IsNullOrEmpty(itemsStr))
         {
-            if (item is not { m_stack: > 0 })
-                continue;
-
-            Vector2i pos = item.m_gridPos;
-
-            // Negative positions are considered overflow
-            if (pos.x < 0 || pos.y < 0 || pos.x >= newCols || pos.y >= newRows)
-            {
-                overflow.Add(item);
-                continue;
-            }
-
-            if (!occupied[pos.x, pos.y])
-            {
-                occupied[pos.x, pos.y] = true;
-            }
-            else
-            {
-                // Two items in same slot? Keep the first, overflow the rest.
-                overflow.Add(item);
-            }
-        }
-
-        // Second pass: try to move overflow items into free slots inside the new grid
-        List<ItemDrop.ItemData> stillOverflow = [];
-
-        foreach (ItemDrop.ItemData item in overflow)
-        {
-            if (item is not { m_stack: > 0 })
-                continue;
-
-            if (TryFindFirstFreeSlot(occupied, newCols, newRows, out Vector2i freePos))
-            {
-                item.m_gridPos = freePos;
-                occupied[freePos.x, freePos.y] = true;
-            }
-            else
-            {
-                // No room left anywhere in the new grid
-                stillOverflow.Add(item);
-            }
-        }
-
-        if (stillOverflow.Count == 0)
-            return;
-
-        // Third pass: drop the truly overflowing items next to the container
-        Vector3 basePos = container.transform.position;
-        Vector3 forward = container.transform.forward;
-
-        Vector3 dropBasePos = basePos + forward * 0.6f + Vector3.up * 0.3f;
-
-        int index = 0;
-
-        foreach (ItemDrop.ItemData item in stillOverflow)
-        {
-            if (item is not { m_stack: > 0 })
-                continue;
-
-            int amount = item.m_stack;
-
-            // Slight spread so they don't all land in the same spot
-            float angle = index * 20f;
-            Vector3 dir = Quaternion.Euler(0f, angle, 0f) * forward;
-            Vector3 dropPos = dropBasePos + dir * 0.2f;
-
-            // Remove from inventory first, like Player.DropItem does
-            bool removed = inv.RemoveItem(item, amount);
-            if (!removed)
-            {
-                AzuContainerSizesPlugin.AzuContainerSizesLogger.LogWarning($"Failed to remove overflow item '{item.m_shared?.m_name ?? "<null>"}' from container '{inventoryName}' while shrinking.");
-                continue;
-            }
-
             try
             {
-                ItemDrop.DropItem(item, amount, dropPos, Quaternion.identity);
+                // Parse the saved package into a big temporary inventory to
+                // see all grid positions without clipping.
+                ZPackage pkg = new(itemsStr);
+                Inventory tempInv = new(container.m_name, null, 30, 30);
+                tempInv.Load(pkg);
+
+                List<ItemDrop.ItemData> items = tempInv.GetAllItems();
+                if (items is { Count: > 0 })
+                {
+                    int maxX = -1;
+                    int maxY = -1;
+
+                    foreach (ItemDrop.ItemData item in items)
+                    {
+                        if (item is not { m_stack: > 0 })
+                            continue;
+
+                        Vector2i p = item.m_gridPos;
+                        if (p.x > maxX) maxX = p.x;
+                        if (p.y > maxY) maxY = p.y;
+                    }
+
+                    if (maxX >= 0)
+                        cols = Mathf.Max(cols, maxX + 1);
+                    if (maxY >= 0)
+                        rows = Mathf.Max(rows, maxY + 1);
+                }
             }
             catch (Exception e)
             {
-                AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Exception while dropping overflow item '{item.m_shared?.m_name ?? "<null>"}' from container '{inventoryName}': {e}");
+                AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Failed to probe saved items in AdjustSizeBeforeInventoryCtor for '{inventoryName}': {e}");
             }
-
-            index++;
         }
+
+        container.m_width = cols;
+        container.m_height = rows;
     }
 
-    private static bool TryFindFirstFreeSlot(bool[,] occupied, int cols, int rows, out Vector2i pos)
+    /// <summary>
+    /// Called from config SettingChanged handlers.
+    /// Applies config to currently loaded containers but never shrinks below what
+    /// the saved items require.
+    ///
+    /// This avoids item loss or out-of-range visuals on live changes as well.
+    /// </summary>
+    internal static void UpdateContainerSize()
     {
-        for (int y = 0; y < rows; ++y)
+        foreach (Container container in Resources.FindObjectsOfTypeAll<Container>())
         {
-            for (int x = 0; x < cols; ++x)
-            {
-                if (occupied[x, y]) continue;
-                pos = new Vector2i(x, y);
-                return true;
-            }
-        }
+            if (!container)
+                continue;
 
-        pos = default;
-        return false;
+            if (!container.m_nview || !container.m_nview.IsValid())
+                continue;
+
+            ZDO zdo = container.m_nview.GetZDO();
+            if (zdo == null)
+                continue;
+
+            Inventory inv = container.GetInventory();
+            if (inv == null)
+                continue;
+
+            int rows = inv.m_height;
+            int cols = inv.m_width;
+
+            Transform root = container.transform.root;
+            string inventoryName = root ? root.name.Trim().Replace("(Clone)", "") : container.gameObject.name;
+
+            GetConfiguredSizeForName(inventoryName, ref rows, ref cols);
+            rows = Mathf.Max(1, rows);
+            cols = Mathf.Max(1, cols);
+
+            string itemsStr = zdo.GetString(ZDOVars.s_items);
+            if (!string.IsNullOrEmpty(itemsStr))
+            {
+                try
+                {
+                    ZPackage pkg = new(itemsStr);
+                    Inventory tempInv = new(container.m_name, null, 30, 30);
+                    tempInv.Load(pkg);
+
+                    List<ItemDrop.ItemData> items = tempInv.GetAllItems();
+                    if (items is { Count: > 0 })
+                    {
+                        int maxX = -1;
+                        int maxY = -1;
+
+                        foreach (ItemDrop.ItemData item in items)
+                        {
+                            if (item is not { m_stack: > 0 })
+                                continue;
+
+                            Vector2i p = item.m_gridPos;
+                            if (p.x > maxX) maxX = p.x;
+                            if (p.y > maxY) maxY = p.y;
+                        }
+
+                        if (maxX >= 0)
+                            cols = Mathf.Max(cols, maxX + 1);
+                        if (maxY >= 0)
+                            rows = Mathf.Max(rows, maxY + 1);
+                    }
+                }
+                catch (Exception e)
+                {
+                    AzuContainerSizesPlugin.AzuContainerSizesLogger.LogError($"Failed to probe saved items in UpdateContainerSize for '{inventoryName}': {e}");
+                }
+            }
+
+            inv.m_width = cols;
+            inv.m_height = rows;
+        }
     }
 
     private static void GetConfiguredSizeForName(string inventoryName, ref int rows, ref int cols)
@@ -314,7 +212,7 @@ public static class ContainerFunctions
         int inventoryRows = rows;
         int inventoryColumns = cols;
 
-        if (AzuContainerSizesPlugin.ChestContainerControl.Value == AzuContainerSizesPlugin.Toggle.On)
+        if (AzuContainerSizesPlugin.ChestContainerControl.Value.IsOn())
         {
             switch (inventoryName)
             {
