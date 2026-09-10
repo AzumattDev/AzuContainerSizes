@@ -65,9 +65,6 @@ internal static class ContainerFunctions
     /// </summary>
     internal static void AdjustSizeBeforeInventoryCtor(Container container)
     {
-        if (!TryGetValidZdo(container, out ZDO zdo))
-            return;
-
         int rows = container.m_height;
         int cols = container.m_width;
 
@@ -77,8 +74,9 @@ internal static class ContainerFunctions
         rows = Mathf.Max(1, rows);
         cols = Mathf.Max(1, cols);
 
-        // Ensure not to shrink below what the items already saved in it need in order to fit.
-        EnsureFitsSavedItems(container, zdo, ref rows, ref cols, inventoryName);
+        // ZDO is only needed for the saved-items safety check; apply config regardless.
+        if (TryGetValidZdo(container, out ZDO zdo))
+            EnsureFitsSavedItems(container, zdo, ref rows, ref cols, inventoryName);
 
         container.m_width = cols;
         container.m_height = rows;
@@ -95,8 +93,9 @@ internal static class ContainerFunctions
     {
         foreach (Container container in Resources.FindObjectsOfTypeAll<Container>())
         {
-            if (!TryGetValidZdo(container, out ZDO zdo))
-                continue;
+            if (!container) continue;
+            ZNetView nview = container.m_nview;
+            if (!nview || !nview.IsValid()) continue;
 
             Inventory inv = container.GetInventory();
             if (inv == null)
@@ -110,7 +109,9 @@ internal static class ContainerFunctions
             rows = Mathf.Max(1, rows);
             cols = Mathf.Max(1, cols);
 
-            EnsureFitsSavedItems(container, zdo, ref rows, ref cols, inventoryName);
+            ZDO? zdo = nview.GetZDO();
+            if (zdo != null)
+                EnsureFitsSavedItems(container, zdo, ref rows, ref cols, inventoryName);
 
             inv.m_width = cols;
             inv.m_height = rows;
@@ -275,8 +276,17 @@ internal static class ContainerFunctions
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static string GetInventoryName(Container container)
     {
-        Transform root = container.transform.root;
-        return root ? root.name.Trim().Replace("(Clone)", "") : container.gameObject.name;
+        // Containers that delegate their network identity to a parent vehicle (e.g. Karve,
+        // VikingShip) have m_rootObjectOverride set. Identify those by root transform name.
+        // Standalone containers — including player-placed pieces on custom ships/rafts —
+        // have m_rootObjectOverride null and must be identified by their own GameObject name,
+        // otherwise the raft root name masks the piece's prefab name and config is never applied.
+        if (container.m_rootObjectOverride != null)
+        {
+            Transform root = container.transform.root;
+            return root ? root.name.Replace("(Clone)", "").Trim() : container.gameObject.name.Replace("(Clone)", "").Trim();
+        }
+        return container.gameObject.name.Replace("(Clone)", "").Trim();
     }
 
     /// <summary>
