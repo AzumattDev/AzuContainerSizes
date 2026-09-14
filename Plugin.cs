@@ -15,7 +15,7 @@ namespace AzuContainerSizes
     public class AzuContainerSizesPlugin : BaseUnityPlugin
     {
         internal const string ModName = "AzuContainerSizes";
-        internal const string ModVersion = "1.1.5";
+        internal const string ModVersion = "1.1.7";
         internal const string Author = "Azumatt";
         private const string ModGUID = Author + "." + ModName;
         private static string ConfigFileName = ModGUID + ".cfg";
@@ -99,6 +99,10 @@ namespace AzuContainerSizes
         public static ConfigEntry<int> IronCol = null!;
         public static ConfigEntry<int> BmRow = null!;
         public static ConfigEntry<int> BmCol = null!;
+        public static ConfigEntry<int> WardrobeRow = null!;
+        public static ConfigEntry<int> WardrobeCol = null!;
+        public static ConfigEntry<int> GraustenRow = null!;
+        public static ConfigEntry<int> GraustenCol = null!;
         public static ConfigEntry<string> ShipCustomRowCol = null!;
 
         internal ConfigEntry<T> config<T>(string group, string name, T value, ConfigDescription description,

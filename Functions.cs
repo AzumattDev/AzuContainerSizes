@@ -37,10 +37,18 @@ public class Functions
         AzuContainerSizesPlugin.BmCol = AzuContainerSizesPlugin.Instance.config("2 - Chests",
             "Blackmetal Chest Columns", 8,
             new ConfigDescription("Blackmetal Chest Columns", new AcceptableValueRange<int>(6, 8)));
+        AzuContainerSizesPlugin.WardrobeRow = AzuContainerSizesPlugin.Instance.config("2 - Chests", "Wardrobe Rows", 10,
+            new ConfigDescription("Wardrobe Rows", new AcceptableValueRange<int>(2, 20)));
+        AzuContainerSizesPlugin.WardrobeCol = AzuContainerSizesPlugin.Instance.config("2 - Chests", "Wardrobe Columns", 5,
+            new ConfigDescription("Wardrobe Columns", new AcceptableValueRange<int>(3, 8)));
+        AzuContainerSizesPlugin.GraustenRow = AzuContainerSizesPlugin.Instance.config("2 - Chests", "Grausten Chest Rows", 5,
+            new ConfigDescription("Grausten Chest Rows", new AcceptableValueRange<int>(2, 20)));
+        AzuContainerSizesPlugin.GraustenCol = AzuContainerSizesPlugin.Instance.config("2 - Chests", "Grausten Chest Columns", 8,
+            new ConfigDescription("Grausten Chest Columns", new AcceptableValueRange<int>(3, 8)));
 
         AzuContainerSizesPlugin.ChestList = AzuContainerSizesPlugin.Instance.TextEntryConfig("2 - Chests", "Custom Chest List",
             "",
-            "List of chests to change size. Use the name of the chest prefab. You can add as many as you want it follows the Custom Chest Rows/Columns settings. Separate each name with a comma. Example: piece_chest_private,piece_chest,piece_chest_wood,piece_chest_iron,piece_chest_blackmetal");
+            "List of chests to change size. Use the name of the chest prefab. You can add as many as you want it follows the Custom Chest Rows/Columns settings. Separate each name with a comma. Example: piece_chest_private,piece_chest,piece_chest_wood,piece_chest_iron,piece_chest_blackmetal,piece_chest_warderobe,piece_chest_grausten");
         AzuContainerSizesPlugin.CustomRowCol = AzuContainerSizesPlugin.Instance.TextEntryConfig("2 - Chests",
             "Custom Chests Rows & Columns",
             "",
@@ -77,6 +85,10 @@ public class Functions
         AzuContainerSizesPlugin.IronCol.SettingChanged += (_, _) => ContainerFunctions.UpdateContainerSize();
         AzuContainerSizesPlugin.BmRow.SettingChanged += (_, _) => ContainerFunctions.UpdateContainerSize();
         AzuContainerSizesPlugin.BmCol.SettingChanged += (_, _) => ContainerFunctions.UpdateContainerSize();
+        AzuContainerSizesPlugin.WardrobeRow.SettingChanged += (_, _) => ContainerFunctions.UpdateContainerSize();
+        AzuContainerSizesPlugin.WardrobeCol.SettingChanged += (_, _) => ContainerFunctions.UpdateContainerSize();
+        AzuContainerSizesPlugin.GraustenRow.SettingChanged += (_, _) => ContainerFunctions.UpdateContainerSize();
+        AzuContainerSizesPlugin.GraustenCol.SettingChanged += (_, _) => ContainerFunctions.UpdateContainerSize();
         AzuContainerSizesPlugin.ChestList.SettingChanged += (_, _) => ContainerFunctions.UpdateContainerSize();
         AzuContainerSizesPlugin.CustomRowCol.SettingChanged += (_, _) => ContainerFunctions.UpdateContainerSize();
         AzuContainerSizesPlugin.KarveRow.SettingChanged += (_, _) => ContainerFunctions.UpdateContainerSize();
@@ -87,7 +99,7 @@ public class Functions
         AzuContainerSizesPlugin.ShipCustomRowCol.SettingChanged += (_, _) => ContainerFunctions.UpdateContainerSize();
         AzuContainerSizesPlugin.CartRow.SettingChanged += (_, _) => ContainerFunctions.UpdateContainerSize();
         AzuContainerSizesPlugin.CartCol.SettingChanged += (_, _) => ContainerFunctions.UpdateContainerSize();
-        
+
     }
 
     internal static void TextAreaDrawer(ConfigEntryBase entry)

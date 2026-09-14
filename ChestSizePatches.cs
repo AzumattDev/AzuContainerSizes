@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Reflection.Emit;
@@ -146,6 +146,14 @@ internal static class ContainerFunctions
                 case "piece_chest_blackmetal":
                     inventoryRows = AzuContainerSizesPlugin.BmRow.Value;
                     inventoryColumns = AzuContainerSizesPlugin.BmCol.Value;
+                    break;
+                case "piece_chest_warderobe":
+                    inventoryRows = AzuContainerSizesPlugin.WardrobeRow.Value;
+                    inventoryColumns = AzuContainerSizesPlugin.WardrobeCol.Value;
+                    break;
+                case "piece_chest_grausten":
+                    inventoryRows = AzuContainerSizesPlugin.GraustenRow.Value;
+                    inventoryColumns = AzuContainerSizesPlugin.GraustenCol.Value;
                     break;
             }
 
